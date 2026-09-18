@@ -131,6 +131,9 @@ unsafe_op_in_unsafe_fn = "warn"
 unused_qualifications = "warn"
 
 [features]
+# Runs winit and the render world on web workers (the `web_worker` module).
+web-worker = ["bevy_internal/web-worker"]
+
 default = ["2d", "3d", "ui", "audio"]
 
 # PROFILE: The default 2D Bevy experience. This includes the core Bevy framework, 2D functionality, scenes and picking.
