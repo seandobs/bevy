@@ -93,6 +93,8 @@ pub struct App {
     /// [`ScheduleRunnerPlugin`]: https://docs.rs/bevy/latest/bevy/app/struct.ScheduleRunnerPlugin.html
     pub(crate) runner: RunnerFn,
     fallback_error_handler: Option<ErrorHandler>,
+    /// Runs [`App::finish`] and [`App::cleanup`] in place of the runner, see [`App::set_finisher`].
+    pub(crate) finisher: Option<FinisherFn>,
 }
 
 impl Debug for App {
@@ -151,6 +153,7 @@ impl App {
             },
             runner: Box::new(run_once),
             fallback_error_handler: None,
+            finisher: None,
         }
     }
 
@@ -189,9 +192,22 @@ impl App {
             panic!("App::run() was called while a plugin was building.");
         }
 
+        if let Some(finisher) = self.finisher.take() {
+            let app = core::mem::replace(self, App::empty());
+            *self = finisher(app);
+        }
+
         let runner = core::mem::replace(&mut self.runner, Box::new(run_once));
         let app = core::mem::replace(self, App::empty());
         (runner)(app)
+    }
+
+    /// Sets a function that [`App::run`] passes the app through before the runner, to have
+    /// [`App::finish`] and [`App::cleanup`] run somewhere other than the runner's thread (the
+    /// runner skips them for an app that comes back cleaned). `f` returns the app it was given.
+    pub fn set_finisher(&mut self, f: impl FnOnce(App) -> App + 'static) -> &mut Self {
+        self.finisher = Some(Box::new(f));
+        self
     }
 
     /// Sets the function that will be called when the app is run.
@@ -1527,6 +1543,7 @@ impl Plugin for HokeyPokey {
 }
 
 type RunnerFn = Box<dyn FnOnce(App) -> AppExit>;
+type FinisherFn = Box<dyn FnOnce(App) -> App>;
 
 fn run_once(mut app: App) -> AppExit {
     while app.plugins_state() == PluginsState::Adding {

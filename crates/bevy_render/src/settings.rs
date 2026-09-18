@@ -223,6 +223,12 @@ impl RenderResources {
 pub enum RenderCreation {
     /// Allows renderer resource initialization to happen outside of the rendering plugin.
     Manual(RenderResources),
+    /// The resources are created on the render worker
+    /// ([`web_worker::render_worker_main`](crate::web_worker::render_worker_main)) and only
+    /// dereferenced there, during [`Plugin::finish`](bevy_app::Plugin::finish); see
+    /// [`web_worker::init_on_render_worker`](crate::web_worker::init_on_render_worker).
+    #[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+    WebWorker,
     /// Lets the rendering plugin create resources itself.
     Automatic(Box<WgpuSettings>),
 }
@@ -266,6 +272,10 @@ impl RenderCreation {
         match self {
             RenderCreation::Manual(resources) => {
                 *future_resources.lock().unwrap() = Some(resources.clone());
+            }
+            #[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+            RenderCreation::WebWorker => {
+                unreachable!("`insert_future_resources` takes the render worker's resources")
             }
             RenderCreation::Automatic(render_creation) => {
                 let Some(backends) = render_creation.backends else {

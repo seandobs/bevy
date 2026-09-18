@@ -106,6 +106,11 @@ pub fn render_system(
                     window.present();
                     window.needs_initial_present = false;
                 }
+                // The view is unusable after present. Drop it here, on the render thread,
+                // because on the web the wgpu handles belong to the worker that created them.
+                if window.swap_chain_texture.is_none() {
+                    window.swap_chain_texture_view = None;
+                }
             }
         });
 
@@ -237,6 +242,28 @@ pub async fn initialize_renderer(
         }
     });
 
+    initialize_renderer_on(
+        instance,
+        surface.as_ref(),
+        options,
+        #[cfg(feature = "raw_vulkan_init")]
+        raw_vulkan_init_settings,
+        #[cfg(feature = "raw_vulkan_init")]
+        additional_vulkan_features,
+    )
+    .await
+}
+
+/// Creates the adapter, device and queue on `instance`, compatible with `surface` if given.
+pub(crate) async fn initialize_renderer_on(
+    instance: Instance,
+    surface: Option<&wgpu::Surface<'_>>,
+    options: &WgpuSettings,
+    #[cfg(feature = "raw_vulkan_init")]
+    raw_vulkan_init_settings: raw_vulkan_init::RawVulkanInitSettings,
+    #[cfg(feature = "raw_vulkan_init")]
+    mut additional_vulkan_features: raw_vulkan_init::AdditionalVulkanFeatures,
+) -> RenderResources {
     let force_fallback_adapter = std::env::var("WGPU_FORCE_FALLBACK_ADAPTER")
         .map_or(options.force_fallback_adapter, |v| {
             !(v.is_empty() || v == "0" || v == "false")
@@ -248,7 +275,7 @@ pub async fn initialize_renderer(
 
     let request_adapter_options = RequestAdapterOptions {
         power_preference: options.power_preference,
-        compatible_surface: surface.as_ref(),
+        compatible_surface: surface,
         force_fallback_adapter,
     };
 

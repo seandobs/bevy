@@ -156,13 +156,6 @@ fn extract_windows(
             needs_initial_present: true,
         });
 
-        if extracted_window.swap_chain_texture.is_none() {
-            // If we called present on the previous swap-chain texture last update,
-            // then drop the swap chain frame here, otherwise we can keep it for the
-            // next update as an optimization. `prepare_windows` will only acquire a new
-            // swap chain texture if needed.
-            extracted_window.swap_chain_texture_view = None;
-        }
         extracted_window.size_changed = new_width != extracted_window.physical_width
             || new_height != extracted_window.physical_height;
         extracted_window.present_mode_changed =
@@ -205,6 +198,13 @@ struct SurfaceData {
     configuration: SurfaceConfiguration,
     texture_view_format: Option<TextureFormat>,
 }
+
+/// A surface created ahead of time for the primary window, used instead of creating one from
+/// the window's raw handle. On the web the `OffscreenCanvas` lives on the render worker while
+/// the winit window (and its handle) lives on the app worker, so the surface has to be created
+/// where the canvas is (`web_worker::render_worker_main`).
+#[derive(Resource, Default)]
+pub struct PrecreatedSurface(pub(crate) Option<WgpuWrapper<wgpu::Surface<'static>>>);
 
 #[derive(Resource, Default)]
 pub struct WindowSurfaces {
@@ -368,23 +368,34 @@ pub fn create_surfaces(
     render_instance: Res<RenderInstance>,
     render_adapter: Res<RenderAdapter>,
     render_device: Res<RenderDevice>,
+    mut precreated: Option<ResMut<PrecreatedSurface>>,
 ) {
+    let primary = windows.primary;
     for window in windows.windows.values_mut() {
         let data = window_surfaces
             .surfaces
             .entry(window.entity)
             .or_insert_with(|| {
-                let surface_target = SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: Some(window.handle.get_display_handle()),
-                    raw_window_handle: window.handle.get_window_handle(),
-                };
-                // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
-                let surface = unsafe {
-                    // NOTE: On some OSes this MUST be called from the main thread.
-                    // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
-                    render_instance
-                        .create_surface_unsafe(surface_target)
-                        .expect("Failed to create wgpu surface")
+                let precreated = precreated
+                    .as_mut()
+                    .filter(|_| primary == Some(window.entity))
+                    .and_then(|p| p.0.take());
+                let surface = if let Some(surface) = precreated {
+                    surface
+                } else {
+                    let surface_target = SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: Some(window.handle.get_display_handle()),
+                        raw_window_handle: window.handle.get_window_handle(),
+                    };
+                    // SAFETY: The window handles in ExtractedWindows will always be valid objects to create surfaces on
+                    let surface = unsafe {
+                        // NOTE: On some OSes this MUST be called from the main thread.
+                        // As of wgpu 0.15, only fallible if the given window is a HTML canvas and obtaining a WebGPU or WebGL2 context fails.
+                        render_instance
+                            .create_surface_unsafe(surface_target)
+                            .expect("Failed to create wgpu surface")
+                    };
+                    WgpuWrapper::new(surface)
                 };
                 let caps = surface.get_capabilities(&render_adapter);
                 let present_mode = present_mode(window, &caps);
@@ -438,7 +449,7 @@ pub fn create_surfaces(
                 render_device.configure_surface(&surface, &configuration);
 
                 SurfaceData {
-                    surface: WgpuWrapper::new(surface),
+                    surface,
                     configuration,
                     texture_view_format,
                 }

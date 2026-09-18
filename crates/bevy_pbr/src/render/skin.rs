@@ -502,8 +502,13 @@ fn remove_skin(skin_uniforms: &mut SkinUniforms, skinned_mesh_entity: MainEntity
 pub fn no_automatic_skin_batching(
     mut commands: Commands,
     query: Query<Entity, (With<SkinnedMesh>, Without<NoAutomaticBatching>)>,
-    render_device: Res<RenderDevice>,
+    render_device: Option<Res<RenderDevice>>,
 ) {
+    // The main world may not hold a device handle when rendering runs on another web
+    // worker. Without one there is no uniform-buffer fallback to worry about.
+    let Some(render_device) = render_device else {
+        return;
+    };
     if !skins_use_uniform_buffers(&render_device.limits()) {
         return;
     }
