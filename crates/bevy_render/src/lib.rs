@@ -51,8 +51,10 @@ pub mod gpu_component_array_buffer;
 pub mod gpu_readback;
 pub mod mesh;
 pub mod occlusion_culling;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "web-worker"))]
 pub mod pipelined_rendering;
+#[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+pub mod web_worker;
 pub mod render_asset;
 pub mod render_phase;
 pub mod render_resource;
@@ -356,6 +358,16 @@ impl Plugin for RenderPlugin {
         load_shader_library!(app, "color_operations.wgsl");
         load_shader_library!(app, "bindless.wgsl");
 
+        #[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+        if matches!(self.render_creation, RenderCreation::WebWorker) {
+            // `finish` touches the wgpu handles, which belong to the render worker, so it
+            // runs there along with `cleanup`.
+            app.set_finisher(|app| {
+                web_worker::init_on_render_worker(app)
+                    .unwrap_or_else(|e| panic!("render worker: {e:?}"))
+            });
+        }
+
         if insert_future_resources(&self.render_creation, app.world_mut()) {
             // We only create the render world and set up extraction if we
             // have a rendering backend available.
@@ -464,6 +476,13 @@ impl Plugin for RenderPlugin {
                 render.world_mut(),
                 self.synchronous_pipeline_compilation,
             );
+
+            #[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+            if let Some(surface) = web_worker::take_surface() {
+                render
+                    .world_mut()
+                    .insert_resource(view::window::PrecreatedSurface(Some(surface)));
+            }
         }
     }
 }
@@ -501,6 +520,13 @@ fn send_time(time_sender: Res<TimeSender>) {
 ///
 /// Returns true if creation was successful, false otherwise.
 fn insert_future_resources(render_creation: &RenderCreation, main_world: &mut World) -> bool {
+    // The render worker fills its own slot, so the plugin waits on that one.
+    #[cfg(all(target_arch = "wasm32", feature = "web-worker"))]
+    if matches!(render_creation, RenderCreation::WebWorker) {
+        main_world.insert_resource(FutureRenderResources(web_worker::resources_slot()));
+        return true;
+    }
+
     let primary_window = main_world
         .query_filtered::<&RawHandleWrapperHolder, With<PrimaryWindow>>()
         .single(main_world)
