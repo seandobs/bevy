@@ -8,7 +8,7 @@ pub use render_context::{
     CurrentView, FlushCommands, PendingCommandBuffers, RenderContext, RenderContextState, ViewQuery,
 };
 pub use render_device::*;
-pub use wgpu_wrapper::WgpuWrapper;
+pub use wgpu_wrapper::{drop_parked_wgpu_values, WgpuWrapper};
 
 use crate::{
     settings::{RenderResources, WgpuSettings, WgpuSettingsPriority},

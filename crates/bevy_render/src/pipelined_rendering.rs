@@ -178,7 +178,7 @@ impl Plugin for PipelinedRenderingPlugin {
             // queued behind everything submitted before it, and wgpu's WebGPU backend has no
             // `on_submitted_work_done`.
             let mut fences: Vec<crate::render_resource::Buffer> = Vec::new();
-            let mut in_flight: std::collections::VecDeque<(usize, async_channel::Receiver<()>)> =
+            let mut in_flight: std::collections::VecDeque<(usize, Receiver<()>)> =
                 std::collections::VecDeque::new();
             let mut frame: usize = 0;
             loop {
