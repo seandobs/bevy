@@ -5554,3 +5554,6 @@ name = "Light Probe Blending"
 description = "Demonstrates blending between multiple reflection probes"
 category = "3D Rendering"
 wasm = false
+
+[patch.crates-io]
+winit = { git = "https://github.com/robtfm/winit", rev = "29c7b96" }
