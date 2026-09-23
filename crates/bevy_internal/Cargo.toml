@@ -10,7 +10,14 @@ keywords = ["game", "engine", "gamedev", "graphics", "bevy"]
 categories = ["game-engines", "graphics", "gui", "rendering"]
 
 [features]
-web-worker = ["bevy_winit/web-worker", "bevy_render?/web-worker"]
+web-worker = [
+  "bevy_winit/web-worker",
+  "bevy_render?/web-worker",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:js-sys",
+  "dep:web-sys",
+]
 trace = [
   "bevy_app/trace",
   "bevy_asset?/trace",
@@ -584,6 +591,16 @@ bevy_android = { path = "../bevy_android", version = "0.19.1", default-features 
 # Only enable bevy_remote/http (default features) on non-WASM targets.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bevy_remote = { path = "../bevy_remote", version = "0.19.1", default-features = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3.67", optional = true, features = [
+  'HtmlCanvasElement',
+  'OffscreenCanvas',
+  'Worker',
+] }
 
 [lints]
 workspace = true

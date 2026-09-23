@@ -106,6 +106,8 @@ pub use bevy_ui_widgets as ui_widgets;
 pub use bevy_utils as utils;
 #[cfg(feature = "bevy_window")]
 pub use bevy_window as window;
+#[cfg(all(target_arch = "wasm32", feature = "web-worker", feature = "bevy_render", feature = "bevy_winit"))]
+pub mod web_worker;
 #[cfg(feature = "bevy_winit")]
 pub use bevy_winit as winit;
 #[cfg(feature = "bevy_world_serialization")]
