@@ -433,8 +433,13 @@ pub fn prepare_morph_descriptors(
 pub fn no_automatic_morph_batching(
     mut commands: Commands,
     query: Query<Entity, (With<MeshMorphWeights>, Without<NoAutomaticBatching>)>,
-    render_device: Res<RenderDevice>,
+    render_device: Option<Res<RenderDevice>>,
 ) {
+    // The main world may not hold a device handle when rendering runs on another web
+    // worker. Without one there is no uniform-buffer fallback to worry about.
+    let Some(render_device) = render_device else {
+        return;
+    };
     // We *can* batch mesh instances with morph targets if the platform supports
     // storage buffers.
     if !skin::skins_use_uniform_buffers(&render_device.limits()) {
