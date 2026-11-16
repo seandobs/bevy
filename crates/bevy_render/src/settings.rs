@@ -192,10 +192,15 @@ impl RenderResources {
         let compressed_image_format_support =
             CompressedImageFormatSupport(CompressedImageFormats::from_features(device.features()));
 
-        main_world.insert_resource(device.clone());
-        main_world.insert_resource(queue.clone());
-        main_world.insert_resource(adapter_info.clone());
-        main_world.insert_resource(render_adapter.clone());
+        // With the render world on its own web worker, the wgpu handles stay out of the main
+        // world, because any use of them there, a drop included, crosses threads.
+        #[cfg(not(all(target_arch = "wasm32", feature = "web-worker")))]
+        {
+            main_world.insert_resource(device.clone());
+            main_world.insert_resource(queue.clone());
+            main_world.insert_resource(adapter_info.clone());
+            main_world.insert_resource(render_adapter.clone());
+        }
         main_world.insert_resource(compressed_image_format_support);
 
         #[cfg(feature = "raw_vulkan_init")]
