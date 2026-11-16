@@ -20,8 +20,10 @@ use wasm_bindgen::JsValue;
 use web_sys::OffscreenCanvas;
 
 use crate::{
+    error_handler::RenderState,
     renderer::{initialize_renderer_on, WgpuWrapper},
     settings::{RenderResources, WgpuSettings},
+    RenderApp, RenderStartup,
 };
 
 /// The wgpu resources [`render_worker_main`] created, taken by the render plugin's `finish`.
@@ -88,6 +90,13 @@ pub async fn render_worker_main(
     // both of which must happen on this worker.
     let SendApp(mut app) = channels().to_render.1.recv().await.map_err(js_err)?;
     app.finish();
+    // `RenderStartup` creates GPU resources, so it runs here too. Left to the first extract, it
+    // would run on the app worker, which `PipelinedRenderingPlugin` has extract on.
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        let world = render_app.world_mut();
+        world.run_schedule(RenderStartup);
+        world.insert_resource(RenderState::Ready);
+    }
     app.cleanup();
     channels().to_app.0.send(SendApp(app)).await.map_err(js_err)
 }
