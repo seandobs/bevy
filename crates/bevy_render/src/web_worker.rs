@@ -110,9 +110,25 @@ async fn create_render_resources(
         flags: settings.instance_flags,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let surface = instance
-        .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))
-        .map_err(js_err)?;
+    // `wgpu-core`, which the WebGL2 backend goes through, refuses a surface
+    // without a display handle, although its GL backend never reads one. The
+    // web display handle carries no data, and the WebGPU backend ignores it.
+    let value: &JsValue = &canvas;
+    let raw_window_handle = wgpu::rwh::WebOffscreenCanvasWindowHandle::new(
+        core::ptr::NonNull::from(value).cast(),
+    )
+    .into();
+    // SAFETY: `canvas` outlives the call, and every backend copies the canvas
+    // or its context into the surface, as `Instance::create_surface` relies on
+    // for an `OffscreenCanvas` target.
+    #[expect(unsafe_code, reason = "see the safety comment above")]
+    let surface = unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(wgpu::rwh::WebDisplayHandle::new().into()),
+            raw_window_handle,
+        })
+    }
+    .map_err(js_err)?;
     let resources = initialize_renderer_on(instance, Some(&surface), &settings).await;
     *resources_slot().lock().unwrap() = Some(resources);
     *SURFACE.lock().unwrap() = Some(WgpuWrapper::new(surface));
