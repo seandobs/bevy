@@ -1,10 +1,12 @@
 use super::RenderQueue;
 use crate::render_resource::{
-    BindGroup, BindGroupLayout, Buffer, ComputePipeline, RawRenderPipelineDescriptor,
-    RenderPipeline, Sampler, Texture,
+    BindGroup, BindGroupLayout, BindGroupLayoutId, Buffer, ComputePipeline,
+    RawRenderPipelineDescriptor, RenderPipeline, Sampler, Texture,
 };
 use crate::renderer::WgpuWrapper;
-use bevy_ecs::resource::Resource;
+use bevy_ecs::{resource::Resource, system::Res};
+use bevy_platform::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferAsyncError, BufferBindingType, PollError, PollStatus,
@@ -19,6 +21,87 @@ pub struct RenderDevice {
     features: wgpu::Features,
     /// The device's limits, read once for the same reason.
     limits: wgpu::Limits,
+    /// The bind groups made in the last few frames, by layout and resources.
+    /// The engine makes many bind groups again every frame from the same
+    /// inputs, and on the WebGPU backend each one is a call into the browser.
+    bind_groups: Arc<WgpuWrapper<Mutex<HashMap<BindGroupKey, KeptBindGroup>>>>,
+}
+
+/// The frames a kept bind group stays unused before the cache drops it. The
+/// engine swaps a current and a previous buffer each frame for some data, so
+/// a frame binds the same buffers as the frame two before it.
+const KEPT_FRAMES: u8 = 2;
+
+/// A bind group that [`RenderDevice::create_bind_group`] keeps, and the
+/// frames since it last returned it.
+struct KeptBindGroup {
+    group: BindGroup,
+    idle: u8,
+}
+
+/// What a bind group binds: its layout, and the resource at each binding.
+/// wgpu compares its handles by identity, and the key holds a clone of each,
+/// so no resource it names is dropped and replaced by another at the same
+/// address while the key lives.
+#[derive(PartialEq, Eq, Hash)]
+struct BindGroupKey {
+    layout: BindGroupLayoutId,
+    entries: Vec<(u32, BoundResource)>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum BoundResource {
+    Buffer(BoundBuffer),
+    Buffers(Vec<BoundBuffer>),
+    Sampler(wgpu::Sampler),
+    Samplers(Vec<wgpu::Sampler>),
+    TextureView(wgpu::TextureView),
+    TextureViews(Vec<wgpu::TextureView>),
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct BoundBuffer(wgpu::Buffer, wgpu::BufferAddress, Option<wgpu::BufferSize>);
+
+impl BoundBuffer {
+    fn of(binding: &wgpu::BufferBinding) -> Self {
+        Self(binding.buffer.clone(), binding.offset, binding.size)
+    }
+}
+
+impl BindGroupKey {
+    /// The key of a bind group of `layout` binding `entries`, or `None` if
+    /// an entry binds a resource the cache doesn't key: an acceleration
+    /// structure or an external texture.
+    fn of(layout: &BindGroupLayout, entries: &[BindGroupEntry]) -> Option<Self> {
+        use wgpu::BindingResource as R;
+        let entries = entries.iter().map(|entry| {
+            let resource = match &entry.resource {
+                R::Buffer(binding) => BoundResource::Buffer(BoundBuffer::of(binding)),
+                R::BufferArray(bindings) => {
+                    BoundResource::Buffers(bindings.iter().map(BoundBuffer::of).collect())
+                }
+                R::Sampler(sampler) => BoundResource::Sampler((*sampler).clone()),
+                R::SamplerArray(samplers) => {
+                    BoundResource::Samplers(samplers.iter().map(|s| (*s).clone()).collect())
+                }
+                R::TextureView(view) => BoundResource::TextureView((*view).clone()),
+                R::TextureViewArray(views) => {
+                    BoundResource::TextureViews(views.iter().map(|v| (*v).clone()).collect())
+                }
+                _ => return None,
+            };
+            Some((entry.binding, resource))
+        });
+        Some(Self {
+            layout: layout.id(),
+            entries: entries.collect::<Option<_>>()?,
+        })
+    }
+}
+
+/// Drops the bind groups that the frame didn't ask the [`RenderDevice`] for.
+pub fn forget_unused_bind_groups(device: Res<RenderDevice>) {
+    device.forget_unused_bind_groups();
 }
 
 impl From<wgpu::Device> for RenderDevice {
@@ -35,6 +118,7 @@ impl RenderDevice {
             device,
             features,
             limits,
+            bind_groups: Arc::new(WgpuWrapper::new(Mutex::default())),
         }
     }
 
@@ -153,20 +237,53 @@ impl RenderDevice {
         self.device.create_render_bundle_encoder(desc)
     }
 
-    /// Creates a new [`BindGroup`](wgpu::BindGroup).
-    #[inline]
+    /// Creates a new [`BindGroup`](wgpu::BindGroup), or returns a kept one
+    /// made from the same layout and resources.
+    ///
+    /// A bind group stays kept until [`KEPT_FRAMES`] frames in a row leave
+    /// it unused.
     pub fn create_bind_group<'a>(
         &self,
         label: impl Into<wgpu::Label<'a>>,
         layout: &'a BindGroupLayout,
         entries: &'a [BindGroupEntry<'a>],
     ) -> BindGroup {
-        let wgpu_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-            label: label.into(),
-            layout,
-            entries,
+        let label: wgpu::Label<'a> = label.into();
+        let create = || {
+            BindGroup::from(self.device.create_bind_group(&BindGroupDescriptor {
+                label,
+                layout,
+                entries,
+            }))
+        };
+        let Some(key) = BindGroupKey::of(layout, entries) else {
+            return create();
+        };
+        let lock = || self.bind_groups.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(kept) = lock().get_mut(&key) {
+            kept.idle = 0;
+            return kept.group.clone();
+        }
+        // Made outside the lock, so threads that miss don't wait on each
+        // other. Two that miss on the same key each make a group, and the
+        // cache keeps the second.
+        let group = create();
+        let kept = KeptBindGroup {
+            group: group.clone(),
+            idle: 0,
+        };
+        lock().insert(key, kept);
+        group
+    }
+
+    /// Drops each kept bind group that [`Self::create_bind_group`] hasn't
+    /// returned for [`KEPT_FRAMES`] frames. Runs once a frame.
+    pub fn forget_unused_bind_groups(&self) {
+        let mut cache = self.bind_groups.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.retain(|_, kept| {
+            kept.idle += 1;
+            kept.idle <= KEPT_FRAMES
         });
-        BindGroup::from(wgpu_bind_group)
     }
 
     /// Creates a [`BindGroupLayout`](wgpu::BindGroupLayout).

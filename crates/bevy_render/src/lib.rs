@@ -90,7 +90,7 @@ use crate::{
     mesh::{MeshRenderAssetPlugin, RenderMesh},
     render_asset::prepare_assets,
     render_resource::{PipelineCache, SparseBufferPlugin},
-    renderer::{render_system, RenderAdapterInfo, RenderGraph},
+    renderer::{forget_unused_bind_groups, render_system, RenderAdapterInfo, RenderGraph},
     settings::{RenderCreation, WgpuLimits},
     storage::StoragePlugin,
     texture::TexturePlugin,
@@ -431,6 +431,7 @@ impl Plugin for RenderPlugin {
                         .chain()
                         .in_set(RenderSystems::Render),
                     reset_render_asset_bytes_per_frame.in_set(RenderSystems::Cleanup),
+                    forget_unused_bind_groups.in_set(RenderSystems::Cleanup),
                 ),
             );
         }
