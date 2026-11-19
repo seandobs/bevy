@@ -18,7 +18,11 @@ pub mod cfg {
             async_executor
         }
 
-        #[cfg(all(not(target_arch = "wasm32"), feature = "multi_threaded"))] => {
+        // A web build has threads only when it is built with shared memory and atomics.
+        #[cfg(all(
+            any(not(target_arch = "wasm32"), target_feature = "atomics"),
+            feature = "multi_threaded"
+        ))] => {
             /// Indicates multithreading support.
             multi_threaded
         }
@@ -92,10 +96,11 @@ cfg::web! {
 
 cfg::multi_threaded! {
     if {
+        pub mod thread;
         mod task_pool;
         mod thread_executor;
 
-        pub use task_pool::{Scope, TaskPool, TaskPoolBuilder};
+        pub use task_pool::{run_scopes_on_this_thread, Scope, TaskPool, TaskPoolBuilder};
         pub use thread_executor::{ThreadExecutor, ThreadExecutorTicker};
     } else {
         mod single_threaded_task_pool;
@@ -127,6 +132,13 @@ pub mod prelude {
 /// This will always return at least 1.
 pub fn available_parallelism() -> usize {
     cfg::switch! {{
+        cfg::multi_threaded => {
+            thread::registered_parallelism().unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(core::num::NonZero::<usize>::get)
+                    .unwrap_or(1)
+            })
+        }
         cfg::std => {
             std::thread::available_parallelism()
                 .map(core::num::NonZero::<usize>::get)

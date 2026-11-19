@@ -1,9 +1,6 @@
 use alloc::{boxed::Box, format, string::String, vec::Vec};
-use core::{future::Future, marker::PhantomData, mem, panic::AssertUnwindSafe};
-use std::{
-    thread::{self, JoinHandle},
-    thread_local,
-};
+use core::{cell::Cell, future::Future, marker::PhantomData, mem, panic::AssertUnwindSafe};
+use std::thread_local;
 
 use crate::executor::FallibleTask;
 use bevy_platform::sync::Arc;
@@ -12,9 +9,23 @@ use futures_lite::FutureExt;
 
 use crate::{
     block_on,
+    thread::{self, ThreadHandle},
     thread_executor::{ThreadExecutor, ThreadExecutorTicker},
     Task,
 };
+
+thread_local! {
+    static SCOPES_HERE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes every [`TaskPool::scope`] called on this thread run its tasks on this thread.
+///
+/// A thread that owns values bound to it calls this, so that a system or a parallel query it
+/// runs never reaches those values from another thread. A web worker that owns the GPU device
+/// is one: a WebGPU object belongs to the worker that made it.
+pub fn run_scopes_on_this_thread() {
+    SCOPES_HERE.with(|here| here.set(true));
+}
 
 struct CallOnDrop(Option<Arc<dyn Fn() + Send + Sync + 'static>>);
 
@@ -137,7 +148,7 @@ pub struct TaskPool {
     executor: Arc<crate::executor::Executor<'static>>,
 
     // The inner state of the pool.
-    threads: Vec<JoinHandle<()>>,
+    threads: Vec<ThreadHandle>,
     shutdown_tx: async_channel::Sender<()>,
 }
 
@@ -176,17 +187,10 @@ impl TaskPool {
                 } else {
                     format!("TaskPool ({i})")
                 };
-                let mut thread_builder = thread::Builder::new().name(thread_name);
-
-                if let Some(stack_size) = builder.stack_size {
-                    thread_builder = thread_builder.stack_size(stack_size);
-                }
-
                 let on_thread_spawn = builder.on_thread_spawn.clone();
                 let on_thread_destroy = builder.on_thread_destroy.clone();
 
-                thread_builder
-                    .spawn(move || {
+                thread::spawn(&thread_name, builder.stack_size, move || {
                         TaskPool::LOCAL_EXECUTOR.with(|local_executor| {
                             if let Some(on_thread_spawn) = on_thread_spawn {
                                 on_thread_spawn();
@@ -392,10 +396,12 @@ impl TaskPool {
             FallibleTask<Result<T, Box<dyn core::any::Any + Send>>>,
         > = unsafe { mem::transmute(&spawned) };
 
+        let here = SCOPES_HERE.with(Cell::get);
         let scope = Scope {
             executor,
             external_executor,
             scope_executor,
+            here,
             spawned,
             scope: PhantomData,
             env: PhantomData,
@@ -426,7 +432,13 @@ impl TaskPool {
                     results
                 };
 
-                let tick_task_pool_executor = tick_task_pool_executor || self.threads.is_empty();
+                // A web worker starts only once the thread that spawned it returns to its event
+                // loop, so a web build's scope runs the pool's tasks itself until the pool's
+                // workers are up.
+                let tick_task_pool_executor = (tick_task_pool_executor
+                    || self.threads.is_empty()
+                    || cfg!(target_arch = "wasm32"))
+                    && !here;
 
                 // we get this from a thread local so we should always be on the scope executors thread.
                 // note: it is possible `scope_executor` and `external_executor` is the same executor,
@@ -556,11 +568,26 @@ impl TaskPool {
     ///
     /// If the provided future is non-`Send`, [`TaskPool::spawn_local`] should
     /// be used instead.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn<T>(&self, future: impl Future<Output = T> + Send + 'static) -> Task<T>
     where
         T: Send + 'static,
     {
         self.executor.spawn(future)
+    }
+
+    /// Spawns a static future on the JS event loop of the calling worker, as a web build
+    /// without threads does, since a web future often holds a JS value that cannot leave its
+    /// worker. Only [`TaskPool::scope`] runs work on the pool's workers.
+    #[cfg(target_arch = "wasm32")]
+    pub fn spawn<T>(
+        &self,
+        future: impl Future<Output = T> + crate::ConditionalSend + 'static,
+    ) -> Task<T>
+    where
+        T: crate::ConditionalSend + 'static,
+    {
+        web_task::spawn_local(future)
     }
 
     /// Spawns a static future on the thread-local async executor for the
@@ -578,6 +605,9 @@ impl TaskPool {
     where
         T: 'static,
     {
+        #[cfg(target_arch = "wasm32")]
+        return web_task::spawn_local(future);
+        #[cfg(not(target_arch = "wasm32"))]
         TaskPool::LOCAL_EXECUTOR.with(|executor| executor.spawn(future))
     }
 
@@ -610,7 +640,7 @@ impl Drop for TaskPool {
     fn drop(&mut self) {
         self.shutdown_tx.close();
 
-        let panicking = thread::panicking();
+        let panicking = std::thread::panicking();
         for join_handle in self.threads.drain(..) {
             let res = join_handle.join();
             if !panicking {
@@ -628,6 +658,9 @@ pub struct Scope<'scope, 'env: 'scope, T> {
     executor: &'scope crate::executor::Executor<'scope>,
     external_executor: &'scope ThreadExecutor<'scope>,
     scope_executor: &'scope ThreadExecutor<'scope>,
+    // Whether `spawn` runs its task on the scope's thread, as
+    // [`run_scopes_on_this_thread`] asks.
+    here: bool,
     spawned: &'scope ConcurrentQueue<FallibleTask<Result<T, Box<dyn core::any::Any + Send>>>>,
     // make `Scope` invariant over 'scope and 'env
     scope: PhantomData<&'scope mut &'scope ()>,
@@ -644,6 +677,10 @@ impl<'scope, 'env, T: Send + 'scope> Scope<'scope, 'env, T> {
     ///
     /// For more information, see [`TaskPool::scope`].
     pub fn spawn<Fut: Future<Output = T> + 'scope + Send>(&self, f: Fut) {
+        if self.here {
+            self.spawn_on_scope(f);
+            return;
+        }
         let task = self
             .executor
             .spawn(AssertUnwindSafe(f).catch_unwind())
