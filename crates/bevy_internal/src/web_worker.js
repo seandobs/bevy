@@ -14,6 +14,11 @@
 // request, and the page spawns the worker. A browser starts a worker that another worker spawns
 // only once the spawning worker returns to its event loop, so a worker that blocked waiting on
 // its own child would never see the child start. The page never blocks.
+//
+// When a thread's body ends, its worker posts the page `{ __bevy_ended }` with the addresses of
+// its stack and thread-local storage, and closes. The page then frees both through its own wasm
+// instance. A worker can't free its own: wasm-bindgen's teardown frees the thread-local storage
+// first, and the allocator's later call reads a thread-local and traps.
 
 // The page's thread workers, held until each one's body ends, so the browser never collects one
 // that runs.
@@ -30,8 +35,19 @@ export function spawnThreadWorker(init) {
   }
   const worker = spawnWorker(init);
   threadWorkers.add(worker);
-  worker.addEventListener("message", ({ data }) => {
-    if (data?.__bevy_ready !== undefined) threadWorkers.delete(worker);
+  worker.addEventListener("message", async ({ data }) => {
+    if (data?.__bevy_ready !== undefined && data.error !== undefined) threadWorkers.delete(worker);
+    const ended = data?.__bevy_ended;
+    if (!ended) return;
+    worker.terminate();
+    threadWorkers.delete(worker);
+    try {
+      // The page instantiated this glue already, so `default()` returns its instance's exports.
+      const wasm = await (await import(init.glueUrl)).default();
+      wasm.__wbindgen_thread_destroy(ended.tlsBase, ended.stackAlloc, ended.stackSize);
+    } catch (e) {
+      console.error(`[bevy] freeing the ${init.tag} worker's stack failed`, e);
+    }
   });
 }
 
@@ -111,8 +127,15 @@ if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScop
       }
       postMessage({ __bevy_ready: tag });
       if (closeWhenDone && last !== false) {
-        // A thread's worker frees its stack and thread-local storage and ends with its body.
-        wasm.__wbindgen_thread_destroy?.();
+        // A thread's worker ends with its body, and the page frees its stack and thread-local
+        // storage. A stack size of 0 tells the teardown the thread took the module's default.
+        postMessage({
+          __bevy_ended: {
+            tlsBase: wasm.__tls_base.value,
+            stackAlloc: wasm.__stack_alloc.value,
+            stackSize: stackSize ?? 0,
+          },
+        });
         self.close();
       }
     } catch (e) {
