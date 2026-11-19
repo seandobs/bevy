@@ -22,6 +22,19 @@ cfg_select! {
     _ => {}
 }
 
+/// The threads a pool sized for `threads` starts.
+///
+/// On the web, a pool's `spawn` runs its future on the calling worker's event loop, so only
+/// the compute pool's scopes reach a pool's own workers. The IO and async compute pools there
+/// start none, and still count their share, so the compute pool has the size it has natively.
+fn threads_to_start(threads: usize) -> usize {
+    if cfg!(target_arch = "wasm32") {
+        0
+    } else {
+        threads
+    }
+}
+
 /// Setup of default task pools: [`AsyncComputeTaskPool`], [`ComputeTaskPool`], [`IoTaskPool`].
 #[derive(Default)]
 pub struct TaskPoolPlugin {
@@ -176,7 +189,7 @@ impl TaskPoolOptions {
 
             IoTaskPool::get_or_init(|| {
                 let builder = TaskPoolBuilder::default()
-                    .num_threads(io_threads)
+                    .num_threads(threads_to_start(io_threads))
                     .thread_name("IO Task Pool".to_string());
 
                 #[cfg(not(all(target_arch = "wasm32", feature = "web")))]
@@ -206,7 +219,7 @@ impl TaskPoolOptions {
 
             AsyncComputeTaskPool::get_or_init(|| {
                 let builder = TaskPoolBuilder::default()
-                    .num_threads(async_compute_threads)
+                    .num_threads(threads_to_start(async_compute_threads))
                     .thread_name("Async Compute Task Pool".to_string());
 
                 #[cfg(not(all(target_arch = "wasm32", feature = "web")))]

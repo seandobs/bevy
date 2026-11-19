@@ -44,11 +44,11 @@ pub trait SystemExecutor: Send + Sync {
 
 /// Returns the default executor for the current platform.
 ///
-/// On Wasm or when the `multi_threaded` feature is disabled, this returns a
+/// On Wasm without atomics, or when the `multi_threaded` feature is disabled, this returns a
 /// [`SingleThreadedExecutor`]. Otherwise it returns a [`MultiThreadedExecutor`].
 pub fn default_executor() -> Box<dyn SystemExecutor> {
     #[cfg(all(
-        not(target_arch = "wasm32"),
+        any(not(target_arch = "wasm32"), target_feature = "atomics"),
         feature = "std",
         feature = "multi_threaded"
     ))]
@@ -56,7 +56,7 @@ pub fn default_executor() -> Box<dyn SystemExecutor> {
         Box::new(MultiThreadedExecutor::new())
     }
     #[cfg(any(
-        target_arch = "wasm32",
+        all(target_arch = "wasm32", not(target_feature = "atomics")),
         not(feature = "std"),
         not(feature = "multi_threaded")
     ))]

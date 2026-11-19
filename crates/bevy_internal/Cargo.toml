@@ -13,6 +13,10 @@ categories = ["game-engines", "graphics", "gui", "rendering"]
 web-worker = [
   "bevy_winit/web-worker",
   "bevy_render?/web-worker",
+  "bevy_render?/multi_threaded",
+  "bevy_ecs/multi_threaded",
+  "bevy_tasks/multi_threaded",
+  "bevy_transform/multi_threaded",
   "dep:wasm-bindgen",
   "dep:wasm-bindgen-futures",
   "dep:js-sys",
