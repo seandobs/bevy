@@ -9,6 +9,31 @@
 // print, prefixed with the worker's tag. When the last export returns (or its promise resolves) the worker posts
 // `{ __bevy_ready: tag }`; if importing the glue or an export fails it posts
 // `{ __bevy_ready: tag, error }` instead.
+//
+// Every thread's worker is a child of the page. A worker that starts a thread posts the page a
+// request, and the page spawns the worker. A browser starts a worker that another worker spawns
+// only once the spawning worker returns to its event loop, so a worker that blocked waiting on
+// its own child would never see the child start. The page never blocks.
+
+// The page's thread workers, held until each one's body ends, so the browser never collects one
+// that runs.
+const threadWorkers = new Set();
+
+/**
+ * Spawns a thread's worker: on the page directly, and on a worker by a request to the page.
+ * @param {Parameters<typeof spawnWorker>[0]} init
+ */
+export function spawnThreadWorker(init) {
+  if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
+    postMessage({ __bevy_spawn: init });
+    return;
+  }
+  const worker = spawnWorker(init);
+  threadWorkers.add(worker);
+  worker.addEventListener("message", ({ data }) => {
+    if (data?.__bevy_ready !== undefined) threadWorkers.delete(worker);
+  });
+}
 
 /**
  * Page side: spawns a worker and posts it its init message.
@@ -23,6 +48,10 @@ export function spawnWorker(init) {
     if (!data) return;
     if (data.__bevy_log) {
       printLog(data);
+      return;
+    }
+    if (data.__bevy_spawn) {
+      spawnThreadWorker(data.__bevy_spawn);
       return;
     }
     if (data.__bevy_call !== undefined) {

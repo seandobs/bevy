@@ -50,6 +50,8 @@ pub use bevy_render::web_worker::{
 extern "C" {
     #[wasm_bindgen(js_name = spawnWorker, catch)]
     fn spawn_worker_js(init: &Object) -> Result<Worker, JsValue>;
+    #[wasm_bindgen(js_name = spawnThreadWorker, catch)]
+    fn spawn_thread_worker_js(init: &Object) -> Result<(), JsValue>;
 }
 
 /// What every worker is spawned with.
@@ -180,6 +182,19 @@ fn spawn(
     transfer: &[JsValue],
     close_when_done: bool,
 ) -> Result<Worker, JsValue> {
+    let init = init_message(glue_url, calls, tag, stack_size, transfer, close_when_done)?;
+    spawn_worker_js(&init)
+}
+
+/// The init message of a worker that calls `calls` in order.
+fn init_message(
+    glue_url: &str,
+    calls: &[(&str, Vec<JsValue>)],
+    tag: &str,
+    stack_size: Option<u32>,
+    transfer: &[JsValue],
+    close_when_done: bool,
+) -> Result<Object, JsValue> {
     let init = Object::new();
     let set = |key: &str, value: &JsValue| Reflect::set(&init, &key.into(), value).map(|_| ());
     set("glueUrl", &glue_url.into())?;
@@ -199,7 +214,7 @@ fn spawn(
     }
     set("transfer", &transfer.iter().collect::<Array>())?;
     set("closeWhenDone", &close_when_done.into())?;
-    spawn_worker_js(&init)
+    Ok(init)
 }
 
 const RENDER_ENTRY: &str = "__bevy_render_worker_main";
@@ -223,9 +238,6 @@ fn bodies() -> std::sync::MutexGuard<'static, BTreeMap<u32, Box<dyn FnOnce() + S
 
 std::thread_local! {
     static KEEP_OPEN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
-    // A worker's handle stays alive with the thread that spawned it, so the browser never
-    // collects the worker while the thread runs.
-    static SPAWNED: core::cell::RefCell<Vec<Worker>> = const { core::cell::RefCell::new(Vec::new()) };
 }
 
 /// Makes every thread `bevy_tasks` starts a worker of this module, sized to the browser's
@@ -250,7 +262,8 @@ pub fn keep_this_worker_open() {
     KEEP_OPEN.with(|keep| keep.set(true));
 }
 
-/// The [`bevy_tasks::thread::ThreadSpawner`] of a web build: a worker that runs `body`.
+/// The [`bevy_tasks::thread::ThreadSpawner`] of a web build: a worker that runs `body`, which
+/// the page spawns.
 fn spawn_thread(
     name: &str,
     stack_size: Option<usize>,
@@ -260,18 +273,17 @@ fn spawn_thread(
     let number = NEXT_BODY.fetch_add(1, Ordering::Relaxed);
     bodies().insert(number, body);
     let stack_size = stack_size.unwrap_or(THREAD_STACK_BYTES) as u32;
-    match spawn(
+    let request = init_message(
         glue_url,
         &[(THREAD_ENTRY, vec![number.into()])],
         name,
         Some(stack_size),
         &[],
         true,
-    ) {
-        Ok(worker) => {
-            SPAWNED.with(|spawned| spawned.borrow_mut().push(worker));
-            Ok(())
-        }
+    )
+    .and_then(|init| spawn_thread_worker_js(&init));
+    match request {
+        Ok(()) => Ok(()),
         Err(error) => {
             bodies().remove(&number);
             Err(error.as_string().unwrap_or_else(|| "the worker failed to start".to_string()))
