@@ -14,7 +14,7 @@
  * Page side: spawns a worker and posts it its init message.
  * @param {{ glueUrl: string, calls: { entry: string, args: any[] }[], tag: string,
  *           module: WebAssembly.Module, memory: WebAssembly.Memory, stackSize?: number,
- *           transfer: Transferable[] }} init
+ *           transfer: Transferable[], closeWhenDone: boolean }} init
  * @returns {Worker}
  */
 export function spawnWorker(init) {
@@ -58,11 +58,11 @@ if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScop
   self.addEventListener("message", async ({ data }) => {
     const init = data?.__bevy_init;
     if (!init) return;
-    const { glueUrl, calls, tag, module, memory, stackSize } = init;
+    const { glueUrl, calls, tag, module, memory, stackSize, closeWhenDone } = init;
     forwardConsole(tag);
     try {
       const glue = await import(glueUrl);
-      await glue.default({ module_or_path: module, memory, thread_stack_size: stackSize });
+      const wasm = await glue.default({ module_or_path: module, memory, thread_stack_size: stackSize });
       for (const key of Object.keys(glue)) {
         if (!key.startsWith("__bevy_page_functions_")) continue;
         for (const name of glue[key]()) {
@@ -74,12 +74,18 @@ if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScop
             });
         }
       }
+      let last;
       for (const { entry, args = [] } of calls) {
         const entryFn = glue[entry];
         if (typeof entryFn !== "function") throw new Error(`${entry} is not exported by ${glueUrl}`);
-        await entryFn(...args);
+        last = await entryFn(...args);
       }
       postMessage({ __bevy_ready: tag });
+      if (closeWhenDone && last !== false) {
+        // A thread's worker frees its stack and thread-local storage and ends with its body.
+        wasm.__wbindgen_thread_destroy?.();
+        self.close();
+      }
     } catch (e) {
       console.error(`[bevy] ${tag} worker failed to start`, e);
       postMessage({ __bevy_ready: tag, error: String(e?.stack ?? e) });

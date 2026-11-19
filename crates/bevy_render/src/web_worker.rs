@@ -82,6 +82,10 @@ pub async fn render_worker_main(
     canvas: OffscreenCanvas,
     settings: WgpuSettings,
 ) -> Result<(), JsValue> {
+    // The render world's systems and parallel queries reach WebGPU objects, which belong to
+    // this worker, so its scopes run their tasks here.
+    #[cfg(feature = "multi_threaded")]
+    bevy_tasks::run_scopes_on_this_thread();
     if resources_slot().lock().unwrap().is_none() {
         create_render_resources(canvas, settings).await?;
     }
