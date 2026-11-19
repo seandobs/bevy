@@ -6,7 +6,7 @@
 // the engine calls (extern blocks marked `#[page_functions]`, listed by the glue exports that
 // attribute generates) each become a function on the worker's global that posts the call to the
 // page and resolves with the page function's result. Console output is sent to the page to
-// print. When the last export returns (or its promise resolves) the worker posts
+// print, prefixed with the worker's tag. When the last export returns (or its promise resolves) the worker posts
 // `{ __bevy_ready: tag }`; if importing the glue or an export fails it posts
 // `{ __bevy_ready: tag, error }` instead.
 
@@ -22,7 +22,7 @@ export function spawnWorker(init) {
   worker.addEventListener("message", async ({ data }) => {
     if (!data) return;
     if (data.__bevy_log) {
-      console[data.__bevy_log](...data.args);
+      printLog(data);
       return;
     }
     if (data.__bevy_call !== undefined) {
@@ -107,6 +107,21 @@ function forwardConsole(tag) {
   self.addEventListener("unhandledrejection", (e) =>
     console.error(`[${tag} worker] unhandled rejection: ${e.reason?.stack ?? e.reason}`)
   );
+}
+
+// Prints a worker's relayed console call on the page, prefixed with the worker's tag, since
+// DevTools otherwise reports the line as the page's own. The prefix joins a leading string
+// rather than preceding it, so a `%c` in that string still styles the arguments that follow.
+// A worker that spawned this one passes the call on unchanged instead, so the page prints the
+// tag of the worker that made the call, once.
+function printLog({ __bevy_log: level, tag, args }) {
+  if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
+    postMessage({ __bevy_log: level, tag, args });
+  } else if (typeof args[0] === "string") {
+    console[level](`[${tag}] ${args[0]}`, ...args.slice(1));
+  } else {
+    console[level](`[${tag}]`, ...args);
+  }
 }
 
 function cloneable(value) {
