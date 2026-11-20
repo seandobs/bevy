@@ -172,6 +172,24 @@ pub fn skins_use_uniform_buffers(limits: &WgpuLimits) -> bool {
     bevy_render::storage_buffers_are_unsupported(limits)
 }
 
+/// Returns true if skins must use uniforms, as [`skins_use_uniform_buffers`]
+/// does, for a system in the main world.
+///
+/// When rendering runs on another web worker, the main world holds no
+/// [`RenderDevice`]. The build then decides: a WebGL 2 build never has
+/// storage buffers, and every other build that renders off the main thread
+/// targets WebGPU, which always has them.
+pub fn main_world_skins_use_uniform_buffers(render_device: Option<&RenderDevice>) -> bool {
+    match render_device {
+        Some(render_device) => skins_use_uniform_buffers(&render_device.limits()),
+        None => cfg!(all(
+            feature = "webgl",
+            target_arch = "wasm32",
+            not(feature = "webgpu")
+        )),
+    }
+}
+
 /// Uploads the buffers containing the joints to the GPU.
 pub fn prepare_skins(
     render_device: Res<RenderDevice>,
@@ -504,12 +522,7 @@ pub fn no_automatic_skin_batching(
     query: Query<Entity, (With<SkinnedMesh>, Without<NoAutomaticBatching>)>,
     render_device: Option<Res<RenderDevice>>,
 ) {
-    // The main world may not hold a device handle when rendering runs on another web
-    // worker. Without one there is no uniform-buffer fallback to worry about.
-    let Some(render_device) = render_device else {
-        return;
-    };
-    if !skins_use_uniform_buffers(&render_device.limits()) {
+    if !main_world_skins_use_uniform_buffers(render_device.as_deref()) {
         return;
     }
 
